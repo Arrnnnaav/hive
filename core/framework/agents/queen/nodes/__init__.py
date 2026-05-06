@@ -32,7 +32,7 @@ def finalize_queen_prompt(text: str, has_vision: bool) -> str:
 # ---------------------------------------------------------------------------
 
 # Independent phase: queen operates as a standalone agent — no worker.
-# Core tools are listed here; MCP tools (coder-tools, gcu-tools) are added
+# Core tools are listed here; MCP tools (files-tools, gcu-tools) are added
 # dynamically in queen_orchestrator.py because their tool names aren't known
 # at import time.
 _QUEEN_INDEPENDENT_TOOLS = [
@@ -40,11 +40,7 @@ _QUEEN_INDEPENDENT_TOOLS = [
     "read_file",
     "write_file",
     "edit_file",
-    "hashline_edit",
-    "list_directory",
     "search_files",
-    "run_command",
-    "undo_changes",
     # NOTE (2026-04-16): ``run_parallel_workers`` is not in the DM phase.
     # Pure DM is for conversation with the user; fan out parallel work via
     # ``start_incubating_colony`` (which gates the colony fork behind a
@@ -60,9 +56,7 @@ _QUEEN_INDEPENDENT_TOOLS = [
 # (e.g. inspect an existing skill) before committing.
 _QUEEN_INCUBATING_TOOLS = [
     "read_file",
-    "list_directory",
     "search_files",
-    "run_command",
     # Schedule lives on the colony, not on the queen session — pass it
     # inline as create_colony(triggers=[...]) instead of staging through
     # set_trigger here.
@@ -76,9 +70,7 @@ _QUEEN_INCUBATING_TOOLS = [
 _QUEEN_WORKING_TOOLS = [
     # Read-only
     "read_file",
-    "list_directory",
     "search_files",
-    "run_command",
     # Monitoring + worker dialogue
     "get_worker_status",
     "inject_message",
@@ -95,9 +87,7 @@ _QUEEN_WORKING_TOOLS = [
 _QUEEN_REVIEWING_TOOLS = [
     # Read-only
     "read_file",
-    "list_directory",
     "search_files",
-    "run_command",
     # Status + escalation replies
     "get_worker_status",
     "list_worker_questions",
@@ -133,8 +123,8 @@ phase. Your identity tells you WHO you are.
 
 _queen_role_independent = """\
 You are in INDEPENDENT mode. \
-You have full coding tools (read/write/edit/search/run) and MCP tools \
-(file operations via coder-tools, browser automation via gcu-tools). \
+You have full coding tools (read/write/edit/search) and MCP tools \
+(file operations via files-tools, browser automation via gcu-tools). \
 Execute the user's task directly using planning, conversation and tools.
 If you need a structured choice or approval gate, always use \
 ``ask_user``; otherwise ask in plain prose. ``ask_user`` takes a \
@@ -248,14 +238,17 @@ re-read state.
 
 See "Independent execution" for the per-step flow and granularity rule.
 
-## File I/O (coder-tools MCP)
-- read_file, write_file, edit_file, hashline_edit, list_directory, \
-search_files, run_command, undo_changes
+## File I/O (files-tools MCP)
+- read_file, write_file, edit_file, search_files
+- edit_file covers single-file fuzzy find/replace (mode='replace', default) \
+and multi-file structured patches (mode='patch'). Patch mode supports \
+Update / Add / Delete / Move atomically across many files in one call.
+- search_files covers grep/find/ls in one tool: target='content' to \
+search inside files, target='files' (with a glob like '*.py') to list \
+or find files.
 
 ## Browser Automation (gcu-tools MCP)
-- Use `browser_*` tools (browser_start, browser_navigate, browser_click, \
-  browser_fill, browser_snapshot, <!-- vision-only -->browser_screenshot, <!-- /vision-only -->browser_scroll, \
-  browser_tabs, browser_close, browser_evaluate, etc.).
+- Use `browser_*` tools — `browser_open(url)` is the cold-start entry point
 - MUST Follow the browser-automation skill protocol before using browser tools.
 
 ## Hand off to a colony
@@ -264,9 +257,7 @@ search_files, run_command, undo_changes
   chat. It does NOT fork on its own; it spawns a one-shot evaluator \
   that reads this conversation and decides whether the spec is settled \
   enough to proceed. On approval your phase flips to INCUBATING and a \
-  new tool surface (including create_colony itself) unlocks. On \
-  rejection you stay here and keep the conversation going to fill the \
-  gaps the evaluator named.
+  new tool surface (including create_colony itself) unlocks.
 """
 
 _queen_tools_incubating = """
@@ -276,10 +267,11 @@ You've been approved to fork. The full coding toolkit is gone on \
 purpose — your job in this phase is to nail the spec, not keep doing \
 work. Available:
 
-## Read-only inspection (coder-tools MCP)
-- read_file, list_directory, search_files, run_command — for confirming \
-details before you commit (e.g. peek at an existing skill in \
-~/.hive/skills/, sanity-check an API URL).
+## Read-only inspection (files-tools MCP)
+- read_file, search_files — for confirming details before \
+you commit (e.g. peek at an existing skill in ~/.hive/skills/, sanity-check \
+an API URL). search_files covers both grep (target='content') and ls/find \
+(target='files', glob like '*.py').
 
 ## Approved → operational checklist (use your judgement, ask only what's missing)
 The conversation that got you here probably did NOT cover all of:
@@ -328,6 +320,18 @@ the rest.
   overall purpose. Validated up front — a bad cron, missing task, or \
   malformed webhook path fails the call before anything is written, \
   so you can retry with corrected input.
+- ``worker_profiles`` (optional array) — pass this ONLY when the \
+  colony needs multiple authorized accounts of the same vendor (two \
+  Slack workspaces, two Gmail accounts) so each worker calls the \
+  right one. Each entry: ``{name, integrations: {provider: alias}, \
+  task?, skill_name?, concurrency_hint?, prompt_override?, \
+  tool_filter?}``. ``alias`` is the account label the user assigned \
+  on hive.adenhq.com (e.g. ``work``, ``personal``); discover \
+  available aliases via ``get_account_info()``. If omitted, the \
+  colony has a single implicit ``default`` profile that uses each \
+  provider's primary account — that's the right call for almost \
+  every colony. Use ``update_worker_profile`` to swap a profile's \
+  alias later without rebuilding the colony.
 - After this returns, the chat is over: the session locks immediately \
   and the user gets a "compact and start a new session with you" \
   button. So make your call to create_colony the last thing you do — \
@@ -373,7 +377,8 @@ operational, not editorial.
   born from a fresh chat via start_incubating_colony.
 
 ## Read-only inspection
-- read_file, list_directory, search_files, run_command
+- read_file, search_files (search_files covers grep/find/ls \
+via target='content' or target='files')
 
 When every worker has reported (success or failure), the phase \
 auto-moves to REVIEWING. You do not need to call a transition tool \
@@ -392,7 +397,7 @@ _queen_tools_reviewing = """
 # Tools (REVIEWING mode)
 
 Workers have finished. You have:
-- Read-only: read_file, list_directory, search_files, run_command
+- Read-only: read_file, search_files (search_files = grep+find+ls)
 - get_worker_status(focus?) — Pull the final status / per-worker reports
 - list_worker_questions() / reply_to_worker(request_id, reply) — Answer any \
 late escalations still in the inbox
@@ -412,17 +417,19 @@ asks for specifics. Do not invent a new pass unless the user asks for one.
 _queen_behavior_independent = """
 ## Independent execution
 
-You are the agent. **For multi-step work (2+ atomic actions): call \
-`task_create_batch`** with one entry per atomic action, \
-before you touch any other tool. \
-Then work the list one task at a time:
+You are the agent. you behave this way:
+1. Identify if the user's prompt is a task assignment. If it is, \
+Use ask_user to clarify the scope and detail requirements, then always use \
+the `task_create_batch` to create a multi-step action plan.
 
-1. `task_update` → in_progress before you start the step.
-2. Do one real inline instance — open the browser, call the real API, \
+2. `task_update` → in_progress before you start the step.
+
+3. Do one real inline instance - either open the browser, call the real API, \
 write to the real file. If the action is irreversible or touches \
 shared systems, show and confirm before executing. Report concrete \
 evidence (actual output, what worked / failed) after the run.
-3. `task_update` → completed THE MOMENT it's done. **Do not let \
+
+4. `task_update` → completed THE MOMENT it's done. **Do not let \
 multiple finished tasks pile up unmarked.** There is no batch update \
 tool by design — each `completed` transition is a discrete progress \
 heartbeat in the user's right-rail panel. Without those transitions \
@@ -431,14 +438,14 @@ done.
 
 **Granularity: one task per atomic action, not one umbrella per project.** \
 
-Once finishing all current tasks, discuss with user about building \
-a colony so this sucess can be repeated or scaled
+Once finishing a current task, discuss with user about building \
+a colony so this success outcome can be repeated or scaled
 
 ### How to handle large scale tasks
-If the user ask you to finish the same task repeatly or at large scale \
-(more than 10 times), tell the user that you can do it once first then \
+If the user ask you to finish the same task repeatedly or at large scale \
+(more than 3 times), tell the user that you can do it once first then \
 build a colony to fulfill the request but succeeding it once will be \
-beneficial to run it in the future, \
+beneficial to run transfer it to a swarm of workers(through start_incubating_colony), \
 then focus on finishing the task once first.
 
 ### How to handle simple task (less then 2 atomic items)

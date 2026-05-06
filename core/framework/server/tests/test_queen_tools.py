@@ -159,7 +159,7 @@ async def test_get_tools_default_allows_everything_for_unknown_queen(queen_dir, 
 
     manager = _FakeManager()
     manager._mcp_tool_catalog = {
-        "coder-tools": [
+        "files-tools": [
             {"name": "read_file", "description": "read", "input_schema": {}},
             {"name": "write_file", "description": "write", "input_schema": {}},
         ],
@@ -175,8 +175,8 @@ async def test_get_tools_default_allows_everything_for_unknown_queen(queen_dir, 
     assert body["is_role_default"] is True  # no sidecar → default-allow
     assert body["stale"] is False
     servers = {s["name"]: s for s in body["mcp_servers"]}
-    assert set(servers) == {"coder-tools"}
-    for tool in servers["coder-tools"]["tools"]:
+    assert set(servers) == {"files-tools"}
+    for tool in servers["files-tools"]["tools"]:
         assert tool["enabled"] is True
 
 
@@ -187,13 +187,16 @@ async def test_get_tools_applies_role_default(queen_dir, monkeypatch):
     _, queen_id = queen_dir  # queen_technology — has a role default
 
     manager = _FakeManager()
-    # Seed a catalog covering tools the role default references so the
-    # response reflects what the queen would actually see on boot.
+    # Seed two MCP servers: files-tools is referenced by the technology
+    # role via the @server:files-tools shorthand in `file_ops`, so its
+    # tools should bubble into the default. unrelated-server is NOT
+    # referenced by any role category — its tools must NOT leak in.
     manager._mcp_tool_catalog = {
-        "coder-tools": [
+        "files-tools": [
             {"name": "read_file", "description": "", "input_schema": {}},
-            {"name": "port_scan", "description": "", "input_schema": {}},  # security
-            {"name": "excel_read", "description": "", "input_schema": {}},  # data
+            {"name": "edit_file", "description": "", "input_schema": {}},
+        ],
+        "unrelated-server": [
             {"name": "fluffy_unknown_tool", "description": "", "input_schema": {}},
         ],
     }
@@ -204,15 +207,49 @@ async def test_get_tools_applies_role_default(queen_dir, monkeypatch):
         assert resp.status == 200
         body = await resp.json()
 
-    # queen_technology's role default includes file_read, data, security, etc.
     assert body["is_role_default"] is True
     enabled = set(body["enabled_mcp_tools"] or [])
+    # @server:files-tools shorthand pulls in every tool under that server.
     assert "read_file" in enabled
-    assert "port_scan" in enabled  # technology role includes security
-    assert "excel_read" in enabled
-    # Tools not in any category (and not in a @server: expansion target
-    # the role references) are NOT part of the default.
+    assert "edit_file" in enabled
+    # Tools registered under a server the role doesn't reference are NOT
+    # part of the default.
     assert "fluffy_unknown_tool" not in enabled
+
+
+@pytest.mark.asyncio
+async def test_get_tools_exposes_categories(queen_dir, monkeypatch):
+    """Response includes the category catalog with role-default flags."""
+    monkeypatch.setattr(routes_queen_tools, "ensure_default_queens", lambda: None)
+    _, queen_id = queen_dir  # queen_technology
+
+    manager = _FakeManager()
+    manager._mcp_tool_catalog = {
+        "files-tools": [
+            {"name": "read_file", "description": "", "input_schema": {}},
+            {"name": "edit_file", "description": "", "input_schema": {}},
+        ],
+    }
+
+    app = await _make_app(manager=manager)
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.get(f"/api/queen/{queen_id}/tools")
+        assert resp.status == 200
+        body = await resp.json()
+
+    cats = {c["name"]: c for c in body["categories"]}
+    # Categories that contribute to queen_technology's role default
+    assert cats["file_ops"]["in_role_default"] is True
+    assert cats["browser_basic"]["in_role_default"] is True
+    # Spreadsheet category is exposed even though queen_technology doesn't
+    # use it — frontend can group/show it.
+    assert "spreadsheet_advanced" in cats
+    assert cats["spreadsheet_advanced"]["in_role_default"] is False
+    # Security was removed from queen_technology defaults.
+    assert cats["security"]["in_role_default"] is False
+    # @server:files-tools shorthand expanded against the catalog.
+    assert "read_file" in cats["file_ops"]["tools"]
+    assert "edit_file" in cats["file_ops"]["tools"]
 
 
 def test_resolve_queen_default_tools_expands_server_shorthand():
@@ -220,16 +257,16 @@ def test_resolve_queen_default_tools_expands_server_shorthand():
     from framework.agents.queen.queen_tools_defaults import resolve_queen_default_tools
 
     catalog = {
-        "gcu-tools": [
-            {"name": "browser_navigate"},
-            {"name": "browser_click"},
+        "files-tools": [
+            {"name": "read_file"},
+            {"name": "write_file"},
         ],
     }
-    # queen_brand_design uses "browser" category → expands via @server:gcu-tools.
+    # queen_brand_design uses "file_ops" category → expands via @server:files-tools.
     result = resolve_queen_default_tools("queen_brand_design", catalog)
     assert result is not None
-    assert "browser_navigate" in result
-    assert "browser_click" in result
+    assert "read_file" in result
+    assert "write_file" in result
 
 
 def test_resolve_queen_default_tools_unknown_queen_returns_none():
@@ -245,7 +282,7 @@ async def test_patch_persists_and_validates(queen_dir, monkeypatch):
 
     manager = _FakeManager()
     manager._mcp_tool_catalog = {
-        "coder-tools": [
+        "files-tools": [
             {"name": "read_file", "description": "", "input_schema": {}},
             {"name": "write_file", "description": "", "input_schema": {}},
         ]
@@ -318,7 +355,7 @@ async def test_patch_hot_reloads_live_session(queen_dir, monkeypatch):
 
     tools_by_name = {"read_file": _tool("read_file"), "write_file": _tool("write_file")}
     registry = _FakeRegistry(
-        server_map={"coder-tools": {"read_file", "write_file"}},
+        server_map={"files-tools": {"read_file", "write_file"}},
         tools_by_name=tools_by_name,
     )
     # Patch get_tools to return real Tool objects for name/description plumbing.
@@ -375,9 +412,12 @@ async def test_delete_restores_role_default(queen_dir, monkeypatch):
 
     manager = _FakeManager()
     manager._mcp_tool_catalog = {
-        "coder-tools": [
+        "files-tools": [
             {"name": "read_file", "description": "", "input_schema": {}},
-            {"name": "port_scan", "description": "", "input_schema": {}},
+            # pdf_read lives in hive_tools but is named explicitly in the
+            # file_ops category, so we stage it in any server here just to
+            # surface it through the catalog.
+            {"name": "pdf_read", "description": "", "input_schema": {}},
         ],
     }
 
@@ -398,11 +438,14 @@ async def test_delete_restores_role_default(queen_dir, monkeypatch):
         assert body["is_role_default"] is True
         assert not tools_path.exists()
 
-        # The new effective list is the role default for queen_technology,
-        # which includes both read_file (file_read) and port_scan (security).
+        # The new effective list is the role default for queen_technology;
+        # security tools were intentionally removed, so port_scan must NOT
+        # appear, while file_ops members like read_file/pdf_read do.
         enabled = set(body["enabled_mcp_tools"] or [])
         assert "read_file" in enabled
-        assert "port_scan" in enabled
+        assert "pdf_read" in enabled
+        assert "port_scan" not in enabled
+        assert "subdomain_enumerate" not in enabled
 
         # GET confirms.
         resp = await client.get(f"/api/queen/{queen_id}/tools")

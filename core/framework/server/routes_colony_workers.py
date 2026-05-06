@@ -62,6 +62,7 @@ def _worker_info_to_dict(info) -> dict:
         "status": str(info.status),
         "started_at": info.started_at,
         "result": result_dict,
+        "profile_name": getattr(info, "profile_name", "") or "",
     }
 
 
@@ -235,10 +236,6 @@ _SYSTEM_TOOLS: frozenset[str] = frozenset(
     {
         "get_account_info",
         "get_current_time",
-        "bash_kill",
-        "bash_output",
-        "execute_command_tool",
-        "example_tool",
     }
 )
 
