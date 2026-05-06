@@ -82,6 +82,8 @@ class AgentHost:
     - Handle lifecycle events (start, pause, shutdown)
 
     Example:
+        import logging
+        logger = logging.getLogger(__name__)
         # Create runtime
         runtime = AgentRuntime(
             graph=support_agent_graph,
