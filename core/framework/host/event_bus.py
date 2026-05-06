@@ -235,8 +235,7 @@ class EventBus:
     - Event history for debugging
 
     Example:
-	import logging
-	logger = logging.getLogger(__name__)
+
         bus = EventBus()
 
         # Subscribe to execution events
